@@ -1,0 +1,280 @@
+#!/usr/bin/env node
+// Whoop CLI - Single tool for all Whoop API interactions
+// Usage: whoop [command] [options]
+// Commands: summary (default), refresh, recovery, sleep, strain, workouts
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+// --- Config ---
+const ENV_FILE = process.env.WHOOP_ENV_FILE || path.join(os.homedir(), '.openclaw/credentials/whoop.env');
+const API_BASE = 'https://api.prod.whoop.com/developer';
+const TOKEN_URL = 'https://api.prod.whoop.com/oauth/oauth2/token';
+
+// --- Env file parsing ---
+function loadEnv() {
+  try {
+    const content = fs.readFileSync(ENV_FILE, 'utf8');
+    const env = {};
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      // Strip quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      env[key] = val;
+    }
+    return env;
+  } catch (e) {
+    console.error(`Error reading ${ENV_FILE}: ${e.message}`);
+    console.error('Set WHOOP_ENV_FILE or create ~/.openclaw/credentials/whoop.env');
+    process.exit(1);
+  }
+}
+
+function saveTokens(env, accessToken, refreshToken) {
+  try {
+    let content = fs.readFileSync(ENV_FILE, 'utf8');
+    content = content.replace(/^WHOOP_ACCESS_TOKEN=.*/m, `WHOOP_ACCESS_TOKEN="${accessToken}"`);
+    content = content.replace(/^WHOOP_REFRESH_TOKEN=.*/m, `WHOOP_REFRESH_TOKEN="${refreshToken}"`);
+    fs.writeFileSync(ENV_FILE, content);
+    env.WHOOP_ACCESS_TOKEN = accessToken;
+    env.WHOOP_REFRESH_TOKEN = refreshToken;
+  } catch (e) {
+    console.error(`Warning: could not save tokens: ${e.message}`);
+  }
+}
+
+// --- HTTP helpers ---
+async function httpGet(url, headers = {}) {
+  const res = await fetch(url, { headers });
+  return { status: res.status, data: await res.json() };
+}
+
+async function httpPost(url, body, headers = {}) {
+  const res = await fetch(url, { method: 'POST', headers, body });
+  return { status: res.status, data: await res.json() };
+}
+
+// --- Token refresh ---
+async function refreshTokens(env) {
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: env.WHOOP_REFRESH_TOKEN,
+    client_id: env.WHOOP_CLIENT_ID,
+    client_secret: env.WHOOP_CLIENT_SECRET,
+    scope: 'offline',
+  });
+
+  const { data } = await httpPost(TOKEN_URL, params.toString(), {
+    'Content-Type': 'application/x-www-form-urlencoded',
+  });
+
+  if (data.error || !data.access_token) {
+    throw new Error(`Token refresh failed: ${JSON.stringify(data)}`);
+  }
+
+  saveTokens(env, data.access_token, data.refresh_token);
+  return data;
+}
+
+// --- API call with auto-refresh ---
+async function whoopApi(env, endpoint) {
+  let { status, data } = await httpGet(`${API_BASE}${endpoint}`, {
+    Authorization: `Bearer ${env.WHOOP_ACCESS_TOKEN}`,
+  });
+
+  if (status === 401) {
+    await refreshTokens(env);
+    ({ status, data } = await httpGet(`${API_BASE}${endpoint}`, {
+      Authorization: `Bearer ${env.WHOOP_ACCESS_TOKEN}`,
+    }));
+  }
+
+  if (status >= 400) {
+    throw new Error(`API error ${status}: ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+// --- Helpers ---
+function msToHours(ms) {
+  return (ms / 3600000).toFixed(1);
+}
+
+function recoveryEmoji(score) {
+  if (score == null || score === 'N/A') return '⚪';
+  if (score >= 67) return '🟢';
+  if (score >= 34) return '🟡';
+  return '🔴';
+}
+
+// --- Commands ---
+async function cmdRecovery(env, jsonOut) {
+  const data = await whoopApi(env, '/v2/recovery?limit=1');
+  const rec = data.records?.[0];
+  if (jsonOut) { console.log(JSON.stringify(rec, null, 2)); return; }
+  if (!rec?.score) { console.log('No recovery data available'); return; }
+  const s = rec.score;
+  console.log(`${recoveryEmoji(s.recovery_score)} Recovery: ${s.recovery_score}%`);
+  console.log(`  ❤️  RHR: ${s.resting_heart_rate} bpm`);
+  console.log(`  📈 HRV: ${s.hrv_rmssd_milli} ms`);
+  console.log(`  🫁 SpO2: ${s.spo2_percentage}%`);
+}
+
+async function cmdSleep(env, jsonOut) {
+  const data = await whoopApi(env, '/v2/activity/sleep?limit=1');
+  const rec = data.records?.[0];
+  if (jsonOut) { console.log(JSON.stringify(rec, null, 2)); return; }
+  if (!rec?.score) { console.log('No sleep data available'); return; }
+  const s = rec.score;
+  const stages = s.stage_summary || {};
+  console.log(`🛏️  Sleep: ${s.sleep_performance_percentage}% performance`);
+  console.log(`  Time in bed: ${msToHours(stages.total_in_bed_time_milli || 0)}h`);
+  console.log(`  🌊 Deep: ${msToHours(stages.total_slow_wave_sleep_time_milli || 0)}h`);
+  console.log(`  💭 REM: ${msToHours(stages.total_rem_sleep_time_milli || 0)}h`);
+  console.log(`  📊 Efficiency: ${s.sleep_efficiency_percentage}%`);
+  console.log(`  🔔 Disturbances: ${stages.disturbance_count ?? 'N/A'}`);
+}
+
+async function cmdStrain(env, jsonOut) {
+  const data = await whoopApi(env, '/v2/cycle?limit=1');
+  const rec = data.records?.[0];
+  if (jsonOut) { console.log(JSON.stringify(rec, null, 2)); return; }
+  if (!rec?.score) { console.log('No strain data available'); return; }
+  const s = rec.score;
+  const cals = Math.round((s.kilojoule || 0) / 4.184);
+  console.log(`💪 Day Strain: ${s.strain}`);
+  console.log(`  💓 Avg HR: ${s.average_heart_rate} bpm | Max: ${s.max_heart_rate} bpm`);
+  console.log(`  🔥 Calories: ${cals} kcal`);
+}
+
+async function cmdWorkouts(env, jsonOut, limit = 5) {
+  const data = await whoopApi(env, `/v2/activity/workout?limit=${limit}`);
+  const recs = data.records || [];
+  if (jsonOut) { console.log(JSON.stringify(recs, null, 2)); return; }
+  if (recs.length === 0) { console.log('No recent workouts'); return; }
+  console.log('🏃 Recent Workouts:');
+  for (const w of recs) {
+    const s = w.score || {};
+    console.log(`  ${w.sport_name}: strain ${Math.floor(s.strain || 0)}, ${s.average_heart_rate}avg/${s.max_heart_rate}max HR`);
+  }
+}
+
+async function cmdRefresh(env, jsonOut) {
+  const data = await refreshTokens(env);
+  if (jsonOut) {
+    console.log(JSON.stringify({ success: true, access_token: data.access_token.slice(0, 20) + '...' }, null, 2));
+    return;
+  }
+  console.log('✓ Tokens refreshed successfully');
+  console.log(`  Access token: ${data.access_token.slice(0, 20)}...`);
+  console.log(`  Refresh token: ${data.refresh_token.slice(0, 20)}...`);
+}
+
+async function cmdSummary(env, jsonOut) {
+  const [recovery, sleep, cycle, workouts] = await Promise.all([
+    whoopApi(env, '/v2/recovery?limit=1'),
+    whoopApi(env, '/v2/activity/sleep?limit=1'),
+    whoopApi(env, '/v2/cycle?limit=1'),
+    whoopApi(env, '/v2/activity/workout?limit=5'),
+  ]);
+
+  if (jsonOut) {
+    console.log(JSON.stringify({
+      recovery: recovery.records?.[0] || null,
+      sleep: sleep.records?.[0] || null,
+      cycle: cycle.records?.[0] || null,
+      workouts: workouts.records || [],
+    }, null, 2));
+    return;
+  }
+
+  const rec = recovery.records?.[0]?.score || {};
+  const slp = sleep.records?.[0]?.score || {};
+  const cyc = cycle.records?.[0]?.score || {};
+  const wks = workouts.records || [];
+  const stages = slp.stage_summary || {};
+
+  console.log('═══════════════════════════════════════');
+  console.log('        🏋️  WHOOP DAILY SUMMARY');
+  console.log('═══════════════════════════════════════');
+  console.log('');
+
+  console.log(`RECOVERY: ${recoveryEmoji(rec.recovery_score)} ${rec.recovery_score ?? 'N/A'}%`);
+  console.log(`  ❤️  RHR: ${rec.resting_heart_rate ?? 'N/A'} bpm`);
+  console.log(`  📈 HRV: ${rec.hrv_rmssd_milli ?? 'N/A'} ms`);
+  console.log(`  🫁 SpO2: ${rec.spo2_percentage ?? 'N/A'}%`);
+  console.log('');
+
+  console.log(`SLEEP: ${slp.sleep_performance_percentage ?? 'N/A'}% performance`);
+  console.log(`  🛏️  Time in bed: ${msToHours(stages.total_in_bed_time_milli || 0)}h`);
+  console.log(`  🌊 Deep sleep: ${msToHours(stages.total_slow_wave_sleep_time_milli || 0)}h`);
+  console.log(`  💭 REM: ${msToHours(stages.total_rem_sleep_time_milli || 0)}h`);
+  console.log(`  📊 Efficiency: ${slp.sleep_efficiency_percentage ?? 'N/A'}%`);
+  console.log(`  🔔 Disturbances: ${stages.disturbance_count ?? 'N/A'}`);
+  console.log('');
+
+  const cals = Math.round((cyc.kilojoule || 0) / 4.184);
+  console.log(`DAY STRAIN: ${cyc.strain ?? 'N/A'}`);
+  console.log(`  💓 Avg HR: ${cyc.average_heart_rate ?? 'N/A'} bpm | Max: ${cyc.max_heart_rate ?? 'N/A'} bpm`);
+  console.log(`  🔥 Calories: ${cals} kcal`);
+  console.log('');
+
+  console.log('RECENT WORKOUTS:');
+  if (wks.length === 0) {
+    console.log('  (none)');
+  } else {
+    for (const w of wks.slice(0, 5)) {
+      const s = w.score || {};
+      console.log(`  🏃 ${w.sport_name}: strain ${Math.floor(s.strain || 0)}, ${s.average_heart_rate}avg/${s.max_heart_rate}max HR`);
+    }
+  }
+  console.log('');
+  console.log('═══════════════════════════════════════');
+}
+
+// --- Main ---
+async function main() {
+  const args = process.argv.slice(2);
+  const jsonOut = args.includes('--json');
+  const limitIdx = args.indexOf('--limit');
+  const limit = limitIdx !== -1 ? parseInt(args[limitIdx + 1]) || 5 : 5;
+  
+  // Find command (first arg that isn't a flag)
+  const command = args.find(a => !a.startsWith('--')) || 'summary';
+
+  const env = loadEnv();
+
+  if (!env.WHOOP_ACCESS_TOKEN && command !== 'refresh') {
+    console.error('No WHOOP_ACCESS_TOKEN found. Run: whoop refresh');
+    process.exit(1);
+  }
+
+  try {
+    switch (command) {
+      case 'summary': await cmdSummary(env, jsonOut); break;
+      case 'recovery': await cmdRecovery(env, jsonOut); break;
+      case 'sleep': await cmdSleep(env, jsonOut); break;
+      case 'strain': await cmdStrain(env, jsonOut); break;
+      case 'workouts': await cmdWorkouts(env, jsonOut, limit); break;
+      case 'refresh': await cmdRefresh(env, jsonOut); break;
+      default:
+        console.error(`Unknown command: ${command}`);
+        console.error('Commands: summary, recovery, sleep, strain, workouts, refresh');
+        process.exit(1);
+    }
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+main();
