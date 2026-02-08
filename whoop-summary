@@ -1,0 +1,123 @@
+#!/bin/bash
+# Get Whoop daily summary: recovery, sleep, strain, recent workouts
+# Usage: whoop-summary [--json]
+
+set -e
+source "${WHOOP_ENV_FILE:-$HOME/.openclaw/credentials/whoop.env}"
+
+JSON_OUTPUT=false
+if [ "$1" == "--json" ]; then
+  JSON_OUTPUT=true
+fi
+
+# Function to make API call with auto-refresh on 401
+whoop_api() {
+  local endpoint="$1"
+  local response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${WHOOP_ACCESS_TOKEN}" \
+    "https://api.prod.whoop.com/developer${endpoint}")
+  local http_code=$(echo "$response" | tail -n1)
+  local body=$(echo "$response" | sed '$d')
+  
+  if [ "$http_code" == "401" ]; then
+    # Try to refresh token
+    whoop-refresh >/dev/null 2>&1
+    source "${WHOOP_ENV_FILE:-$HOME/.openclaw/credentials/whoop.env}"
+    response=$(curl -s -H "Authorization: Bearer ${WHOOP_ACCESS_TOKEN}" \
+      "https://api.prod.whoop.com/developer${endpoint}")
+    echo "$response"
+  else
+    echo "$body"
+  fi
+}
+
+# Fetch data
+RECOVERY=$(whoop_api "/v2/recovery?limit=1")
+SLEEP=$(whoop_api "/v2/activity/sleep?limit=1")
+CYCLE=$(whoop_api "/v2/cycle?limit=1")
+WORKOUTS=$(whoop_api "/v2/activity/workout?limit=5")
+
+if $JSON_OUTPUT; then
+  jq -n \
+    --argjson recovery "$RECOVERY" \
+    --argjson sleep "$SLEEP" \
+    --argjson cycle "$CYCLE" \
+    --argjson workouts "$WORKOUTS" \
+    '{
+      recovery: $recovery.records[0],
+      sleep: $sleep.records[0],
+      cycle: $cycle.records[0],
+      workouts: $workouts.records
+    }'
+  exit 0
+fi
+
+# Pretty print
+echo "═══════════════════════════════════════"
+echo "        🏋️  WHOOP DAILY SUMMARY"
+echo "═══════════════════════════════════════"
+echo ""
+
+# Recovery
+RECOVERY_SCORE=$(echo "$RECOVERY" | jq -r '.records[0].score.recovery_score // "N/A"')
+RHR=$(echo "$RECOVERY" | jq -r '.records[0].score.resting_heart_rate // "N/A"')
+HRV=$(echo "$RECOVERY" | jq -r '.records[0].score.hrv_rmssd_milli // "N/A"')
+SPO2=$(echo "$RECOVERY" | jq -r '.records[0].score.spo2_percentage // "N/A"')
+
+# Color code recovery
+if [ "$RECOVERY_SCORE" != "N/A" ]; then
+  SCORE_INT=${RECOVERY_SCORE%.*}
+  if [ "$SCORE_INT" -ge 67 ]; then
+    RECOVERY_EMOJI="🟢"
+  elif [ "$SCORE_INT" -ge 34 ]; then
+    RECOVERY_EMOJI="🟡"
+  else
+    RECOVERY_EMOJI="🔴"
+  fi
+else
+  RECOVERY_EMOJI="⚪"
+fi
+
+echo "RECOVERY: ${RECOVERY_EMOJI} ${RECOVERY_SCORE}%"
+echo "  ❤️  RHR: ${RHR} bpm"
+echo "  📈 HRV: ${HRV} ms"
+echo "  🫁 SpO2: ${SPO2}%"
+echo ""
+
+# Sleep
+SLEEP_PERF=$(echo "$SLEEP" | jq -r '.records[0].score.sleep_performance_percentage // "N/A"')
+SLEEP_EFF=$(echo "$SLEEP" | jq -r '.records[0].score.sleep_efficiency_percentage // "N/A"')
+IN_BED_MS=$(echo "$SLEEP" | jq -r '.records[0].score.stage_summary.total_in_bed_time_milli // 0')
+DEEP_MS=$(echo "$SLEEP" | jq -r '.records[0].score.stage_summary.total_slow_wave_sleep_time_milli // 0')
+REM_MS=$(echo "$SLEEP" | jq -r '.records[0].score.stage_summary.total_rem_sleep_time_milli // 0')
+DISTURBANCES=$(echo "$SLEEP" | jq -r '.records[0].score.stage_summary.disturbance_count // "N/A"')
+
+# Convert ms to hours
+IN_BED_H=$(echo "scale=1; $IN_BED_MS / 3600000" | bc)
+DEEP_H=$(echo "scale=1; $DEEP_MS / 3600000" | bc)
+REM_H=$(echo "scale=1; $REM_MS / 3600000" | bc)
+
+echo "SLEEP: ${SLEEP_PERF}% performance"
+echo "  🛏️  Time in bed: ${IN_BED_H}h"
+echo "  🌊 Deep sleep: ${DEEP_H}h"
+echo "  💭 REM: ${REM_H}h"
+echo "  📊 Efficiency: ${SLEEP_EFF}%"
+echo "  🔔 Disturbances: ${DISTURBANCES}"
+echo ""
+
+# Day strain
+STRAIN=$(echo "$CYCLE" | jq -r '.records[0].score.strain // "N/A"')
+AVG_HR=$(echo "$CYCLE" | jq -r '.records[0].score.average_heart_rate // "N/A"')
+MAX_HR=$(echo "$CYCLE" | jq -r '.records[0].score.max_heart_rate // "N/A"')
+CALS_KJ=$(echo "$CYCLE" | jq -r '.records[0].score.kilojoule // 0')
+CALS=$(echo "scale=0; $CALS_KJ / 4.184" | bc)
+
+echo "DAY STRAIN: ${STRAIN}"
+echo "  💓 Avg HR: ${AVG_HR} bpm | Max: ${MAX_HR} bpm"
+echo "  🔥 Calories: ${CALS} kcal"
+echo ""
+
+# Recent workouts
+echo "RECENT WORKOUTS:"
+echo "$WORKOUTS" | jq -r '.records[:5][] | "  🏃 \(.sport_name): strain \(.score.strain | floor), \(.score.average_heart_rate)avg/\(.score.max_heart_rate)max HR"' 2>/dev/null || echo "  (none)"
+echo ""
+echo "═══════════════════════════════════════"
