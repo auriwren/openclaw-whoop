@@ -54,13 +54,18 @@ Edit the file with your Client ID and Client Secret.
 
 ### 3. Get Initial Tokens
 
-Build the authorization URL:
+Use the included `whoop-authorize` helper — it opens your browser, catches the redirect on `localhost:8080`, and writes tokens to your env file in one shot:
+
+```bash
+chmod +x whoop-authorize
+./whoop-authorize
+```
+
+If you'd rather do it by hand, the manual flow is:
 
 ```
 https://api.prod.whoop.com/oauth/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=http://localhost:8080/callback&response_type=code&scope=read:recovery read:sleep read:workout read:cycles read:profile offline&state=random123
 ```
-
-Open it in a browser, authorize, then exchange the code:
 
 ```bash
 curl -s -X POST "https://api.prod.whoop.com/oauth/oauth2/token" \
