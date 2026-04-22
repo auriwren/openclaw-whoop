@@ -10,7 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { exec } = require('child_process');
 
-const ENV_FILE = process.env.WHOOP_ENV_FILE || path.join(os.homedir(), '.openclaw/credentials/whoop.env');
+const ENV_FILE = process.env.WHOOP_ENV_FILE || path.join(os.homedir(), '.config/whoop-cli/whoop.env');
 const REDIRECT_URI = 'http://localhost:8080/callback';
 const AUTH_URL = 'https://api.prod.whoop.com/oauth/oauth2/auth';
 const TOKEN_URL = 'https://api.prod.whoop.com/oauth/oauth2/token';

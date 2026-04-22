@@ -8,7 +8,7 @@ const path = require('path');
 const os = require('os');
 
 // --- Config ---
-const ENV_FILE = process.env.WHOOP_ENV_FILE || path.join(os.homedir(), '.openclaw/credentials/whoop.env');
+const ENV_FILE = process.env.WHOOP_ENV_FILE || path.join(os.homedir(), '.config/whoop-cli/whoop.env');
 const API_BASE = 'https://api.prod.whoop.com/developer';
 const TOKEN_URL = 'https://api.prod.whoop.com/oauth/oauth2/token';
 
@@ -33,7 +33,7 @@ function loadEnv() {
     return env;
   } catch (e) {
     console.error(`Error reading ${ENV_FILE}: ${e.message}`);
-    console.error('Set WHOOP_ENV_FILE or create ~/.openclaw/credentials/whoop.env');
+    console.error('Set WHOOP_ENV_FILE or create ~/.config/whoop-cli/whoop.env');
     process.exit(1);
   }
 }
